@@ -143,7 +143,7 @@ app.get('/stress-auth/:cantidad', async (req, res) => {
   });
 });
 
-// ========== NUEVO: REGISTRO MASIVO SIN ESCRITURA EN FIRESTORE ==========
+// ========== REGISTRO MASIVO SIN ESCRITURA ==========
 async function registrarSoloUsuario(index, resultados) {
   const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`;
   const email = `stress_${Date.now()}_${index}@example.com`;
@@ -153,7 +153,7 @@ async function registrarSoloUsuario(index, resultados) {
     await axios.post(url, {
       email,
       password,
-      returnSecureToken: false   // no necesitamos token, solo crear la cuenta
+      returnSecureToken: false
     });
     resultados.exitosas++;
   } catch (error) {
@@ -174,13 +174,66 @@ app.get('/stress-register/:cantidad', async (req, res) => {
   const resultados = { exitosas: 0, fallidas: 0, errores: [] };
   const startTime = Date.now();
 
-  // Lotes de 20 concurrentes con una pausa de 50 ms entre lotes
   const concurrencia = 20;
   for (let i = 0; i < cantidad; i += concurrencia) {
     const lote = [];
     const fin = Math.min(i + concurrencia, cantidad);
     for (let j = i; j < fin; j++) {
       lote.push(registrarSoloUsuario(j, resultados));
+    }
+    await Promise.allSettled(lote);
+    if (i + concurrencia < cantidad) await new Promise(r => setTimeout(r, 50));
+  }
+
+  const elapsed = (Date.now() - startTime) / 1000;
+  res.json({
+    total: cantidad,
+    exitosas: resultados.exitosas,
+    fallidas: resultados.fallidas,
+    errores: resultados.errores.slice(0, 10),
+    tiempoSegundos: elapsed
+  });
+});
+
+// ========== LOGIN MASIVO (FUERZA BRUTA) ==========
+async function intentarLogin(index, resultados) {
+  const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${API_KEY}`;
+  // Usamos un email que no existe y una contraseña cualquiera
+  const email = `fakeuser_${Date.now()}_${index}@example.com`;
+  const password = 'wrongpassword';
+
+  try {
+    await axios.post(url, {
+      email,
+      password,
+      returnSecureToken: false
+    });
+    // Si llega aquí, algo raro pasó (no debería porque la cuenta no existe)
+    resultados.exitosas++;
+  } catch (error) {
+    resultados.fallidas++;
+    resultados.errores.push(error.response?.data?.error?.message || error.message);
+  }
+}
+
+app.get('/stress-login/:cantidad', async (req, res) => {
+  const cantidad = parseInt(req.params.cantidad);
+  if (isNaN(cantidad) || cantidad < 1) {
+    return res.status(400).json({ error: 'Cantidad positiva' });
+  }
+  if (cantidad > 5000) {
+    return res.status(400).json({ error: 'Máximo 5000' });
+  }
+
+  const resultados = { exitosas: 0, fallidas: 0, errores: [] };
+  const startTime = Date.now();
+
+  const concurrencia = 20;
+  for (let i = 0; i < cantidad; i += concurrencia) {
+    const lote = [];
+    const fin = Math.min(i + concurrencia, cantidad);
+    for (let j = i; j < fin; j++) {
+      lote.push(intentarLogin(j, resultados));
     }
     await Promise.allSettled(lote);
     if (i + concurrencia < cantidad) await new Promise(r => setTimeout(r, 50));
