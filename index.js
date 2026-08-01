@@ -4,75 +4,52 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// ========== CONFIGURACIÓN ==========
-// La API Key la tomamos de las variables de entorno (más seguro)
-const API_KEY = process.env.FIRESTORE_API_KEY || 'AIzaSyBx9Np7t_-loUBFX-m-bfFAvjn4dvlkk-s';
+const API_KEY = 'AIzaSyBx9Np7t_-loUBFX-m-bfFAvjn4dvlkk-s'; // Puedes usar variable de entorno
 const PROJECT_ID = 'magiccal1';
-const COLLECTION = 'ventas';
 const BASE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 
-console.log(`🔑 API Key usada: ${API_KEY.substring(0, 10)}... (oculta por seguridad)`);
-
-// ========== FUNCIÓN PARA CREAR VENTA FALSA ==========
-async function crearVenta(index) {
-  const ahora = new Date().toISOString();
-
-  const venta = {
-    fields: {
-      userId: { stringValue: `test_user_${Math.floor(Math.random() * 100)}` },
-      fecha: { timestampValue: ahora },
-      totalBs: { doubleValue: Math.random() * 1000 },
-      totalUsd: { doubleValue: Math.random() * 25 },
-      metodosPagoVenta: {
-        arrayValue: {
-          values: [
-            {
-              mapValue: {
-                fields: {
-                  metodo: { stringValue: 'Efectivo' },
-                  monto: { doubleValue: 100 }
-                }
-              }
-            }
-          ]
-        }
-      },
-      productos: {
-        arrayValue: {
-          values: [
-            {
-              mapValue: {
-                fields: {
-                  nombre: { stringValue: 'Producto Test' },
-                  cantidad: { integerValue: 1 },
-                  precioUsd: { doubleValue: 1 }
-                }
-              }
-            }
-          ]
-        }
-      },
-      nota: { stringValue: `Prueba de estrés REST #${index} - ${ahora}` }
-    }
-  };
-
-  const url = `${BASE_URL}/${COLLECTION}?key=${API_KEY}`;
-
+// ========== 1. LECTURAS MASIVAS ==========
+async function leerDocumento(coleccion, docId) {
+  const url = `${BASE_URL}/${coleccion}/${docId}?key=${API_KEY}`;
   try {
-    const response = await axios.post(url, venta, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-    return { success: true, id: response.data.name };
+    const response = await axios.get(url);
+    return { success: true, data: response.data };
   } catch (error) {
     const mensaje = error.response?.data?.error?.message || error.message;
     return { success: false, error: mensaje };
   }
 }
 
-// ========== FUNCIÓN DE PRUEBA DE ESTRÉS ==========
-async function pruebaDeEstres(cantidad, concurrencia = 50) {
-  console.log(`🚀 Iniciando bombardeo de ${cantidad} transacciones (REST API)...`);
+// Obtener lista de IDs de una colección (para luego leerlos)
+async function listarDocumentos(coleccion, limit = 50) {
+  const url = `${BASE_URL}/${coleccion}?pageSize=${limit}&key=${API_KEY}`;
+  try {
+    const response = await axios.get(url);
+    const docs = response.data.documents || [];
+    const ids = docs.map(doc => doc.name.split('/').pop());
+    return { success: true, ids };
+  } catch (error) {
+    const mensaje = error.response?.data?.error?.message || error.message;
+    return { success: false, error: mensaje };
+  }
+}
+
+// Función de estrés de lectura
+async function pruebaLectura(coleccion, cantidad, concurrencia = 50) {
+  console.log(`📖 Iniciando bombardeo de ${cantidad} lecturas en "${coleccion}"...`);
   const startTime = Date.now();
+
+  // Primero obtener algunos IDs reales (para no leer inexistentes)
+  const listResult = await listarDocumentos(coleccion, Math.min(100, cantidad));
+  if (!listResult.success) {
+    console.error('❌ No se pudieron obtener IDs:', listResult.error);
+    return { total: cantidad, exitosas: 0, fallidas: cantidad, errores: [listResult.error] };
+  }
+  const idsDisponibles = listResult.ids;
+  if (idsDisponibles.length === 0) {
+    console.warn('⚠️ La colección está vacía. No se pueden hacer lecturas.');
+    return { total: cantidad, exitosas: 0, fallidas: cantidad, errores: ['Colección vacía'] };
+  }
 
   let exitosas = 0, fallidas = 0;
   const errores = [];
@@ -80,13 +57,12 @@ async function pruebaDeEstres(cantidad, concurrencia = 50) {
   for (let i = 0; i < cantidad; i += concurrencia) {
     const lote = [];
     const finLote = Math.min(i + concurrencia, cantidad);
-
     for (let j = i; j < finLote; j++) {
-      lote.push(crearVenta(j));
+      // Seleccionar un ID aleatorio de los disponibles
+      const idAleatorio = idsDisponibles[Math.floor(Math.random() * idsDisponibles.length)];
+      lote.push(leerDocumento(coleccion, idAleatorio));
     }
-
     const resultados = await Promise.allSettled(lote);
-
     for (const res of resultados) {
       if (res.status === 'fulfilled' && res.value.success) {
         exitosas++;
@@ -96,51 +72,78 @@ async function pruebaDeEstres(cantidad, concurrencia = 50) {
         errores.push(errorMsg);
       }
     }
-
     if (i + concurrencia < cantidad) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-
     console.log(`📦 Lote ${Math.floor(i / concurrencia) + 1}: exitosas ${exitosas}, fallidas ${fallidas}`);
   }
 
   const elapsed = (Date.now() - startTime) / 1000;
-  console.log(`✅ Exitosas: ${exitosas}, ❌ Fallidas: ${fallidas} en ${elapsed}s`);
+  console.log(`✅ Lecturas exitosas: ${exitosas}, ❌ Fallidas: ${fallidas} en ${elapsed}s`);
+  return { total: cantidad, exitosas, fallidas, errores: errores.slice(0, 10), tiempoSegundos: elapsed };
+}
 
-  return {
-    total: cantidad,
-    exitosas,
-    fallidas,
-    errores: errores.slice(0, 10),
-    tiempoSegundos: elapsed
-  };
+// ========== 2. PRUEBA DE AUTENTICACIÓN ==========
+async function probarAutenticacion() {
+  // Intentar registrar un usuario (con email aleatorio) usando la API Key
+  const email = `test_${Date.now()}@example.com`;
+  const password = '12345678';
+  const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`;
+  try {
+    const response = await axios.post(url, {
+      email,
+      password,
+      returnSecureToken: true
+    });
+    return { success: true, data: response.data };
+  } catch (error) {
+    const mensaje = error.response?.data?.error?.message || error.message;
+    return { success: false, error: mensaje };
+  }
+}
+
+// ========== 3. LISTAR COLECCIONES ==========
+async function listarColecciones() {
+  const url = `${BASE_URL}?key=${API_KEY}`;
+  try {
+    const response = await axios.get(url);
+    return { success: true, data: response.data };
+  } catch (error) {
+    const mensaje = error.response?.data?.error?.message || error.message;
+    return { success: false, error: mensaje };
+  }
 }
 
 // ========== ENDPOINTS ==========
-app.get('/stress/:cantidad', async (req, res) => {
-  const cantidad = parseInt(req.params.cantidad);
-  if (isNaN(cantidad) || cantidad < 1) {
-    return res.status(400).json({ error: 'La cantidad debe ser un número positivo' });
-  }
-  if (cantidad > 10000) {
-    return res.status(400).json({ error: 'Máximo permitido: 10,000' });
-  }
-
+app.get('/stress-read/:coleccion/:cantidad', async (req, res) => {
+  const { coleccion, cantidad } = req.params;
+  const num = parseInt(cantidad);
+  if (isNaN(num) || num < 1) return res.status(400).json({ error: 'Cantidad inválida' });
+  if (num > 5000) return res.status(400).json({ error: 'Máximo 5000 lecturas por prueba' });
   try {
-    const resultado = await pruebaDeEstres(cantidad);
+    const resultado = await pruebaLectura(coleccion, num);
     res.status(200).json(resultado);
   } catch (error) {
-    console.error('Error en prueba:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+app.get('/auth-test', async (req, res) => {
+  const resultado = await probarAutenticacion();
+  res.json(resultado);
 });
+
+app.get('/list-collections', async (req, res) => {
+  const resultado = await listarColecciones();
+  res.json(resultado);
+});
+
+app.get('/health', (req, res) => res.send('OK'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🔥 Servidor de estrés (REST) escuchando en puerto ${PORT}`);
-  console.log(`📌 Ejemplo de uso: GET https://tu-servicio.onrender.com/stress/500`);
+  console.log(`🔥 Servidor de pruebas de debilidad en puerto ${PORT}`);
+  console.log(`📌 GET /stress-read/productos/200`);
+  console.log(`📌 GET /auth-test`);
+  console.log(`📌 GET /list-collections`);
 });
