@@ -8,7 +8,7 @@ const API_KEY = 'AIzaSyBx9Np7t_-loUBFX-m-bfFAvjn4dvlkk-s';
 const PROJECT_ID = 'magiccal1';
 const FIRESTORE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 
-// ========== REGISTRAR USUARIO ==========
+// ========== REGISTRAR USUARIO (original) ==========
 async function registrarUsuario() {
   const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`;
   const email = `test_${Date.now()}@example.com`;
@@ -34,7 +34,7 @@ async function registrarUsuario() {
   }
 }
 
-// ========== CREAR VENTA CON AUTENTICACIÓN ==========
+// ========== CREAR VENTA CON AUTENTICACIÓN (original) ==========
 async function crearVentaConAuth(index, idToken) {
   const ahora = new Date().toISOString();
   const venta = {
@@ -76,7 +76,7 @@ async function crearVentaConAuth(index, idToken) {
     }
   };
 
-  const url = `${FIRESTORE_URL}/ventas`; // Sin ?key, usamos header
+  const url = `${FIRESTORE_URL}/ventas`;
 
   try {
     const response = await axios.post(url, venta, {
@@ -92,7 +92,7 @@ async function crearVentaConAuth(index, idToken) {
   }
 }
 
-// ========== PRUEBA DE ESTRÉS CON AUTENTICACIÓN ==========
+// ========== ENDPOINT ORIGINAL: ESTRÉS CON AUTENTICACIÓN ==========
 app.get('/stress-auth/:cantidad', async (req, res) => {
   const cantidad = parseInt(req.params.cantidad);
   if (isNaN(cantidad) || cantidad < 1) {
@@ -115,7 +115,6 @@ app.get('/stress-auth/:cantidad', async (req, res) => {
   let exitosas = 0, fallidas = 0;
   const errores = [];
 
-  // Lotes de 20 para no saturar (ajustable)
   const concurrencia = 20;
   for (let i = 0; i < cantidad; i += concurrencia) {
     const lote = [];
@@ -144,6 +143,62 @@ app.get('/stress-auth/:cantidad', async (req, res) => {
   });
 });
 
+// ========== NUEVO: REGISTRO MASIVO SIN ESCRITURA EN FIRESTORE ==========
+async function registrarSoloUsuario(index, resultados) {
+  const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${API_KEY}`;
+  const email = `stress_${Date.now()}_${index}@example.com`;
+  const password = 'test123456';
+
+  try {
+    await axios.post(url, {
+      email,
+      password,
+      returnSecureToken: false   // no necesitamos token, solo crear la cuenta
+    });
+    resultados.exitosas++;
+  } catch (error) {
+    resultados.fallidas++;
+    resultados.errores.push(error.response?.data?.error?.message || error.message);
+  }
+}
+
+app.get('/stress-register/:cantidad', async (req, res) => {
+  const cantidad = parseInt(req.params.cantidad);
+  if (isNaN(cantidad) || cantidad < 1) {
+    return res.status(400).json({ error: 'Cantidad positiva' });
+  }
+  if (cantidad > 5000) {
+    return res.status(400).json({ error: 'Máximo 5000' });
+  }
+
+  const resultados = { exitosas: 0, fallidas: 0, errores: [] };
+  const startTime = Date.now();
+
+  // Lotes de 20 concurrentes con una pausa de 50 ms entre lotes
+  const concurrencia = 20;
+  for (let i = 0; i < cantidad; i += concurrencia) {
+    const lote = [];
+    const fin = Math.min(i + concurrencia, cantidad);
+    for (let j = i; j < fin; j++) {
+      lote.push(registrarSoloUsuario(j, resultados));
+    }
+    await Promise.allSettled(lote);
+    if (i + concurrencia < cantidad) await new Promise(r => setTimeout(r, 50));
+  }
+
+  const elapsed = (Date.now() - startTime) / 1000;
+  res.json({
+    total: cantidad,
+    exitosas: resultados.exitosas,
+    fallidas: resultados.fallidas,
+    errores: resultados.errores.slice(0, 10),
+    tiempoSegundos: elapsed
+  });
+});
+
+// ========== HEALTH CHECK ==========
 app.get('/health', (req, res) => res.send('OK'));
+
+// ========== INICIAR SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🔥 Auth stress en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🔥 Stress server corriendo en puerto ${PORT}`));
